@@ -1,0 +1,16 @@
+{
+  "source": "迟到的质控记录：RUN-Q203（seq 103）的观测当日未及时上传，补录后系统按 run_seq 插回原顺序重算",
+  "observations": [
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.44,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q203",
+      "run_seq": 103,
+      "source_ref": "QC-LOG-20261106-LATE"
+    }
+  ]
+}

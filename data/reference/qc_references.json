@@ -1,0 +1,30 @@
+[
+  {
+    "qc_material": "QC-PB-CRM01",
+    "analyte": "lead",
+    "method": "ICP-MS",
+    "instrument": "ICPMS-01",
+    "assigned_value": 0.5,
+    "range_low": 0.4,
+    "range_high": 0.6,
+    "unit": "mg/kg",
+    "window_size": 3,
+    "run_limit": 3,
+    "mean_deviation_limit": 0.05,
+    "note": "铅质控样（本题随附演示配置，虚构标准值，不代表真实标准物质）"
+  },
+  {
+    "qc_material": "QC-HG-CRM02",
+    "analyte": "mercury",
+    "method": "AFS",
+    "instrument": "AFS-01",
+    "assigned_value": 0.1,
+    "range_low": 0.08,
+    "range_high": 0.12,
+    "unit": "mg/kg",
+    "window_size": 3,
+    "run_limit": 3,
+    "mean_deviation_limit": 0.01,
+    "note": "汞质控样（本题随附演示配置，虚构标准值，不代表真实标准物质）"
+  }
+]

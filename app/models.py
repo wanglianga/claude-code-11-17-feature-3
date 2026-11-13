@@ -63,6 +63,29 @@ BATCH_FAIL = "fail"
 BATCH_REVIEW = "needs_review"
 BATCH_HOLD = "hold"  # 前置条件不满足，不能下结论
 
+# ---- 质控漂移监测 ----
+
+# 告警类型：必须区分“已证实失效”与“疑似漂移”，不能一概判原料不合格
+QC_ALERT_OUT_OF_RANGE = "out_of_range"  # 单次越出批准观察范围：已证实失效
+QC_ALERT_DRIFT_TREND = "drift_trend"    # 连续同向/滑动均值持续偏移：疑似漂移
+
+# 告警状态
+ALERT_OPEN = "open"
+ALERT_RESOLVED = "resolved"      # 主管确认关闭（仅关闭告警本身，不等于影响已解除）
+ALERT_SUPERSEDED = "superseded"  # 被重算结论取代（保留历史，不擦除）
+
+# 影响处置状态
+IMPACT_OPEN = "open"
+IMPACT_CLEARED = "cleared"
+
+# 影响通知动作（通知只增不删，已发出的保留）
+NOTIFY_ADDED = "added"
+NOTIFY_REMOVED = "removed"
+
+# 质控配置状态
+QC_CONFIG_ACTIVE = "active"
+QC_CONFIG_RETIRED = "retired"
+
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -327,4 +350,218 @@ class AuditEvent(Base):
     actor: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str | None] = mapped_column(String(128), nullable=True)
     detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---- 质控漂移监测（第四条存储线：质控原件 / 监测结论 / 影响处置分别推进）----
+
+class QCReference(Base):
+    """质控标准值配置：按（质控样 × 项目 × 方法 × 仪器）保存标准值与经批准的观察范围。
+
+    版本化：修改配置 = 新增版本，旧版本置 retired 保留；监测评估记录所用版本，
+    旧告警不被新阈值擦除。
+    """
+
+    __tablename__ = "qc_references"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    qc_material: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyte: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 标准值与经批准的观察范围（单位与观测值单位一致，录入时核对）
+    assigned_value: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    range_low: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    range_high: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 趋势监测参数：滑动均值窗口、连续同向次数阈值、滑动均值偏差阈值
+    window_size: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    run_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    mean_deviation_limit: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=QC_CONFIG_ACTIVE)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("qc_material", "analyte", "method", "instrument", "version",
+                         name="uq_qc_ref_version"),
+    )
+
+
+class CalibrationEvent(Base):
+    """校准变更：自 effective_seq 运行序号起生效，监测计算据此切段，不跨段混算。"""
+
+    __tablename__ = "calibration_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    effective_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recorded_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("instrument", "effective_seq", name="uq_calibration_point"),
+    )
+
+
+class InstrumentRun(Base):
+    """仪器运行登记：run_id -> 仪器与真实运行顺序（run_seq）。
+
+    样品结果的 instrument_run 通过本表获得顺序；run_seq 为空表示顺序未知，
+    影响追查时列为无法定位，不能当作没有受影响样品。
+    """
+
+    __tablename__ = "instrument_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    run_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QCObservation(Base):
+    """质控观测原件：无论监测结论如何，观测原文在此保留。
+
+    run_seq 是真实运行顺序；created_at 是到达时间。迟到记录（run_seq 早、
+    到达晚）插入后按 run_seq 重新排序重算。
+    """
+
+    __tablename__ = "qc_observations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    qc_material: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyte: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    observed_value: Mapped[float] = mapped_column(Numeric(18, 8), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    run_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    observed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "qc_material", "analyte", "method",
+                         name="uq_qc_obs_point"),
+    )
+
+
+class QCEvaluationRun(Base):
+    """监测评估运行：每次评估留痕（触发原因、所用配置版本、逐点指标快照）。"""
+
+    __tablename__ = "qc_evaluation_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    qc_material: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyte: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_id: Mapped[int] = mapped_column(ForeignKey("qc_references.id"), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 触发原因：observation（新观测/迟到记录）/ manual / config_change
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    observation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    alerts_raised: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    alerts_superseded: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # 逐观测点指标快照：[{observation_id, run_seq, deviation, consecutive, moving_avg,
+    #   out_of_range, in_drift, reliable, segment_start}...]，供追查与回查
+    detail: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class QCAlert(Base):
+    """监测结论（不可变；只推进状态）。触发数据完整保存在 trigger_data。"""
+
+    __tablename__ = "qc_alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    evaluation_run_id: Mapped[int] = mapped_column(ForeignKey("qc_evaluation_runs.id"), nullable=False)
+    config_id: Mapped[int] = mapped_column(ForeignKey("qc_references.id"), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    qc_material: Mapped[str] = mapped_column(String(64), nullable=False)
+    analyte: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(128), nullable=False)
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False)
+    observation_id: Mapped[int] = mapped_column(ForeignKey("qc_observations.id"), nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    segment_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 触发数据：观测值、标准值、偏差、连续同向次数、滑动均值、窗口数据、阈值
+    trigger_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=ALERT_OPEN)
+    resolved_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolved_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolve_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ImpactAssessment(Base):
+    """影响处置：每条告警 × 每份受影响报告一项，逐项解除。
+
+    解除依据（校准/复测证据）必须登记；同一报告被多条告警影响时，
+    只有全部未结影响都解除，报告才恢复可批准。
+    """
+
+    __tablename__ = "impact_assessments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("qc_alerts.id"), nullable=False, index=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("reports.id"), nullable=False, index=True)
+    report_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    batch_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=IMPACT_OPEN)
+    trace_run_id: Mapped[int | None] = mapped_column(ForeignKey("qc_trace_runs.id"), nullable=True)
+    # 产生时的触发数据摘要与受影响运行，供批准拦截时展示
+    trigger_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # 解除依据：recalibration（校准证据）/ retest（复测证据）/ auto_recompute（重算移出）
+    clearance_evidence_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    clearance_evidence_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    clearance_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cleared_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cleared_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("alert_id", "report_id", name="uq_impact_alert_report"),
+    )
+
+
+class QCTraceRun(Base):
+    """影响追查运行：窗口、受影响/无法定位清单、报告增减，全部留痕。"""
+
+    __tablename__ = "qc_trace_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("qc_alerts.id"), nullable=False, index=True)
+    reliable_observation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("qc_observations.id"), nullable=True
+    )
+    reliable_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    alert_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 窗口内运行、受影响样品/报告、无法定位运行（缺映射不等于无影响）
+    window_runs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    affected: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    unlocatable: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    reports_added: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    reports_removed: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ImpactNotification(Base):
+    """影响通知：只增不删。重算后报告新增或移出影响清单都会留一条。"""
+
+    __tablename__ = "impact_notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trace_run_id: Mapped[int] = mapped_column(ForeignKey("qc_trace_runs.id"), nullable=False)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("qc_alerts.id"), nullable=False)
+    report_id: Mapped[int] = mapped_column(ForeignKey("reports.id"), nullable=False)
+    report_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(8), nullable=False)  # added / removed
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

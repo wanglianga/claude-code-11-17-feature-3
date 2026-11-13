@@ -1,8 +1,10 @@
 """报告批准流。
 
-- submit：固化当前结果版本引用（result_refs），报告进入 submitted。
+- submit：固化当前结果版本引用（result_refs），报告进入 submitted；
+  若该批次已被质控告警影响，影响同步挂到新报告上（批准暂缓）。
 - approve：批准请求重新读取结果版本；若引用的结果已被修订/失效/冲突重开，
-  版本漂移 -> 拒绝批准并打回，不基于旧快照签发。
+  版本漂移 -> 拒绝批准并打回，不基于旧快照签发；报告存在未解除的质控影响
+  限制时同样拒绝，须主管逐项登记校准/复测证据解除后才可批准。
 - withdraw：已签发报告只能撤回，不能改原文；撤回后用新报告接续（superseded_by 链），
   历史全部保留。
 """
@@ -14,11 +16,14 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     CONFLICT_OPEN,
+    IMPACT_OPEN,
     REPORT_APPROVED,
     REPORT_SUBMITTED,
     REPORT_WITHDRAWN,
     AuditEvent,
     BatchConclusion,
+    ImpactAssessment,
+    QCAlert,
     Report,
     ResultGroup,
     Sample,
@@ -101,6 +106,10 @@ def submit_report(
     db.add(AuditEvent(event_type="report_submitted", actor=inspector,
                       target=report.report_no, detail={"refs": refs}))
     db.flush()
+    # 新报告若落在质控告警的受影响窗口内，影响同步挂到该报告（批准暂缓）
+    from app.qc import retrace_open_alerts
+
+    retrace_open_alerts(db)
     return report
 
 
@@ -130,6 +139,33 @@ def _detect_drift(db: Session, report: Report) -> list[str]:
     return drifts
 
 
+def _detect_qc_holds(db: Session, report: Report) -> list[str]:
+    """报告的未解除质控影响限制：逐项给出触发数据与所需解除依据。"""
+    holds: list[str] = []
+    open_impacts = (
+        db.query(ImpactAssessment)
+        .filter_by(report_id=report.id, status=IMPACT_OPEN)
+        .order_by(ImpactAssessment.id)
+        .all()
+    )
+    for impact in open_impacts:
+        alert = db.get(QCAlert, impact.alert_id)
+        alert_label = "已证实失效（越界）" if (
+            alert and alert.alert_type == "out_of_range"
+        ) else "疑似漂移（趋势）"
+        trigger = impact.trigger_summary.get("trigger_data", {})
+        holds.append(
+            f"限制#{impact.id}（{alert_label}，告警#{impact.alert_id}，"
+            f"仪器 {alert.instrument if alert else '?'} 项目 {alert.analyte if alert else '?'}）："
+            f"触发数据 观测值={trigger.get('observed_value')} "
+            f"偏差={trigger.get('deviation')} "
+            f"连续同向={trigger.get('consecutive_same_direction')} "
+            f"滑动均值偏差={trigger.get('moving_avg_deviation')}；"
+            f"解除依据：需主管登记校准（recalibration）或复测（retest）证据后逐项解除"
+        )
+    return holds
+
+
 def approve_report(db: Session, report_id: int, reviewer: str) -> Report:
     report = db.get(Report, report_id)
     if report is None:
@@ -138,6 +174,14 @@ def approve_report(db: Session, report_id: int, reviewer: str) -> Report:
         raise ReportError("报告已撤回，不能批准；请基于新修订重新提交报告")
     if report.status == REPORT_APPROVED:
         raise ReportError("报告已批准，请勿重复操作")
+
+    # 质控影响限制：全部未结影响解除前不得批准（单个告警关闭不能越过其他限制）
+    holds = _detect_qc_holds(db, report)
+    if holds:
+        db.add(AuditEvent(event_type="report_approval_held", actor=reviewer,
+                          target=report.report_no, detail={"holds": holds}))
+        db.flush()
+        raise ReportError("报告批准暂缓：存在未解除的质控影响限制——" + "；".join(holds))
 
     drifts = _detect_drift(db, report)
     if drifts:

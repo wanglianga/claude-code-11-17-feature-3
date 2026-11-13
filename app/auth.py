@@ -13,9 +13,10 @@ from fastapi import Depends, Header, HTTPException, status
 from app.config import get_settings
 
 ROLE_PERMISSIONS = {
-    "inspector": {"import", "submit", "read"},
-    "reviewer": {"review", "approve", "withdraw", "invalidate", "read"},
-    "admin": {"seed", "read", "review", "import", "submit"},
+    "inspector": {"import", "submit", "read", "qc_observe", "qc_monitor"},
+    "reviewer": {"review", "approve", "withdraw", "invalidate", "read",
+                 "qc_monitor", "qc_clear"},
+    "admin": {"seed", "read", "review", "import", "submit", "qc_configure"},
 }
 
 

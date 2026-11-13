@@ -1,0 +1,60 @@
+{
+  "source": "ICPMS-01 仪器运行日志 2026-11-06（seq 103 的质控记录迟到，见 qc_observations_20261106_late.json）",
+  "observations": [
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.51,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q201",
+      "run_seq": 101,
+      "source_ref": "QC-LOG-20261106"
+    },
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.53,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q202",
+      "run_seq": 102,
+      "source_ref": "QC-LOG-20261106"
+    },
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.55,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q204",
+      "run_seq": 104,
+      "source_ref": "QC-LOG-20261106"
+    },
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.57,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q205",
+      "run_seq": 105,
+      "source_ref": "QC-LOG-20261106"
+    },
+    {
+      "qc_material": "QC-PB-CRM01",
+      "analyte": "lead",
+      "method": "ICP-MS",
+      "instrument": "ICPMS-01",
+      "observed_value": 0.65,
+      "unit": "mg/kg",
+      "run_id": "RUN-Q206",
+      "run_seq": 106,
+      "source_ref": "QC-LOG-20261106"
+    }
+  ]
+}
